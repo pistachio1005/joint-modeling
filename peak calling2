@@ -1,0 +1,406 @@
+#args<-commandArgs(TRUE)
+
+library(readr)
+library(tidyverse)
+library(HMRFBayesHiC)
+library(Matrix)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(fields)
+library(tidyr)
+
+min<-12200000 # min region (from imaging data)
+max<-12900000 # max region (from imaging data)
+
+# Imaging Data, cleaned by Bryce
+setwd("/proj/yunligrp/users/bryce/orca/data/Mateo2019Nature")
+orca_10kb<-read_delim("ORCA_WT_10kb_rpt1_cleaned_interpolated.csv",delim="\t")
+#raw_orca_10kb<-read_delim("ORCA_WT_10kb_rpt1_cleaned.csv.gz",delim=",")
+#Hi-C data,
+
+setwd("/proj/yunligrp/projects/HiC/ORCA/Mateo2019Nature/HiC")
+
+bins<-read_delim("GSE61471_nm_none_10000.bins.txt",delim="\t")
+# Keep only in the window we have imaging data for
+bins_subset<-bins[bins$from.coord>=min & bins$to.coord<=max & bins$chr=="3R",]
+bins_subset$read<-1:70
+
+contact<-read_delim("GSE61471_nm_none_10000.n_contact.txt.gz",delim="\t")
+colnames(contact)[1:2]<-c("cbin_1","cbin_2")
+# Keep only in the window we have imaging data for
+# at least for now
+
+contact_subset<-contact%>%filter(cbin_1%in%bins_subset$cbin & cbin_2%in%bins_subset$cbin)
+contact_subset<-contact_subset[,c(1,2,4)]
+
+
+#data = read.table(paste0("/proj/yunligrp/users/ycyang/FIREcaller/GM12878_downsampling/40KB/MAPQGE30_40kb_count_matrix/MAPQGE30_chr", chr, "_40kb_raw_count_matrix.txt.gz"), header=F)
+#data = read.table(paste0("/proj/yunligrp/users/ycyang/FIREcaller/GM12878_downsampling/40KB/MAPQGE30_40kb_count_matrix/MAPQGE30_chr", chr, "_40kb_raw_count_matrix.txt.gz"), header=F)
+
+#Turn into a contact matrix
+contact_matrix<-spread(contact_subset,cbin_2,observed_count)
+contact_matrix<-subset(contact_matrix,select=-c(1))
+
+downsampled_data1 = matrix(0, ncol = ncol(contact_matrix), nrow = nrow(contact_matrix))
+downsampled_data2 = matrix(0, ncol = ncol(contact_matrix), nrow = nrow(contact_matrix))
+
+set.seed(1)
+for (i in 1:nrow(contact_matrix)){
+  for (j in i:nrow(contact_matrix)){
+    if (contact_matrix[i,j]!=0){
+       counts_downsampling = rbinom(n=1,size=as.numeric(contact_matrix[i,j]),p=0.5)
+       downsampled_data1[i,j] = counts_downsampling
+       downsampled_data1[j,i] = downsampled_data1[i,j]
+
+       downsampled_data2[i,j] = as.numeric(contact_matrix[i,j]) - counts_downsampling
+       downsampled_data2[j,i] = downsampled_data2[i,j]
+    }
+  }
+}
+
+#write.table(downsampled_data1, file = paste0("/proj/yunligrp/users/ycyang/FIREcaller/GM12878_downsampling/40KB/", filename, ".run", SEED, ".rep1.txt"), row.names = F, col.names = F, sep = "\t", quote = F)
+#write.table(downsampled_data2, file = paste0("/proj/yunligrp/users/ycyang/FIREcaller/GM12878_downsampling/40KB/", filename, ".run", SEED, ".rep2.txt"), row.names = F, col.names = F, sep = "\t", quote = F)
+#inters_file<-comb[,c(5,6,10,11,3)]
+
+#convert matrix back to three column
+
+sample1<-setNames(melt(downsampled_data1), c('cbin2', 'cbin1', 'observed_count'))
+sample2<-setNames(melt(downsampled_data2), c('cbin2', 'cbin1', 'observed_count'))
+cbin2_s1<-sample1[,1]+7959
+cbin1_s1<-sample1[,2]+7959
+oc_s1<-sample1[,3]
+cbin2_s2<-sample2[,1]+7959
+cbin1_s2<-sample2[,2]+7959
+oc_s2<-sample2[,3]
+sample1<-cbind(cbin1_s1,cbin2_s1,oc_s1)
+sample2<-cbind(cbin1_s2,cbin2_s2,oc_s2)
+colnames(sample1)<- c("cbin_1","cbin_2","observed_count")
+colnames(sample2)<- c("cbin_1","cbin_2","observed_count")
+sample1_df<-as.data.frame(sample1)
+sample2_df<-as.data.frame(sample2)
+
+#combine with bin information
+bins_subset2<-bins_subset
+colnames(bins_subset)<-paste0(colnames(bins_subset),"_1")
+colnames(bins_subset2)<-paste0(colnames(bins_subset2),"_2")
+
+comb1<-left_join(sample1_df,bins_subset,by="cbin_1")
+comb1<-left_join(comb1,bins_subset2,by="cbin_2")
+comb2<-left_join(sample2_df,bins_subset,by="cbin_1")
+comb2<-left_join(comb2,bins_subset2,by="cbin_2")
+
+# Ensure we don't have duplicate cbin pairs
+# e.g. if we have 1 2 dont need 2 1
+
+comb1<-comb1[comb1$cbin_1<=comb1$cbin_2,]
+comb2<-comb2[comb2$cbin_1<=comb2$cbin_2,]
+
+#Prepare the input file for fit hi-C
+inters_file1<-comb1[,c(4,5,9,10,3)]
+inters_file2<-comb2[,c(4,5,9,10,3)]
+#Remove diagonal terms of the matrix
+inters_file1<-inters_file1[inters_file1$from.coord_1!=inters_file1$from.coord_2,]
+inters_file2<-inters_file2[inters_file2$from.coord_1!=inters_file2$from.coord_2,]
+
+total_contacts1<-rep(NA,length=70)
+j<-0
+for(i in seq(12200000,12890000,by=10000)){
+  j<-j+1
+  total_contacts1[j]<-sum(inters_file1$observed_count[inters_file1$from.coord_1==i | inters_file1$from.coord_2==i])
+}
+
+total_contacts2<-rep(NA,length=70)
+j<-0
+for(i in seq(12200000,12890000,by=10000)){
+  j<-j+1
+  total_contacts2[j]<-sum(inters_file2$observed_count[inters_file2$from.coord_1==i | inters_file2$from.coord_2==i])
+}
+
+#column 2 and 5 are not required for the frad file
+frags_file1<-as.data.frame(cbind("3R",0,seq(12200000,12890000,by=10000),total_contacts1,0))
+frags_file2<-as.data.frame(cbind("3R",0,seq(12200000,12890000,by=10000),total_contacts2,0))
+colnames(frags_file1)<-c("chr","extraField","start","marginalizedContactCount","extraField2")
+colnames(frags_file2)<-c("chr","extraField","start","marginalizedContactCount","extraField2")
+
+#downsample orca data
+dat<-orca_10kb%>%distinct(class,s)
+set.seed(1)
+filter<-dat[sample(nrow(dat), 2236), ]
+imaging_s1 <- filter %>% left_join(orca_10kb)
+set.seed(2)
+filter<-dat[sample(nrow(dat), 2236), ]
+imaging_s2 <- filter %>% left_join(orca_10kb)
+
+#run fit hi-c for the downsampled hi-c data to produce expected counts
+setwd("/proj/yunligrp/users/alicesun")
+write_delim(frags_file1,path="frags_file_s1",delim="\t",col_names = F)
+write_delim(inters_file1,path="inters_file_s1",delim="\t",col_names = F)
+write_delim(frags_file2,path="frags_file_s2",delim="\t",col_names = F)
+write_delim(inters_file2,path="inters_file_s2",delim="\t",col_names = F)
+system("gzip inters_file_s1 frags_file_s1")
+system("gzip inters_file_s2 frags_file_s2")
+
+#this is for downloading the inters and frags file to my local computer
+system(scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/inters_file_s2.gz /Users/yingsun/Desktop/Research/Downsampling)
+
+#create python environment for fit hi-c and run fit hi-c for both samples
+system("conda create --name py2 -c r rpy2 python=2 scipy matplotlib numpy -y")
+system("conda activate py2")
+system("python /Users/yingsun/Desktop/Research/fit-hi-c/bin/fit-hi-c.py -f /Users/yingsun/Desktop/Research/Downsampling/frags_file_s1.gz -i /Users/yingsun/Desktop/Research/Downsampling/inters_file_s1.gz -o /Users/yingsun/Desktop/Research/Downsampling -v")
+system("python /Users/yingsun/Desktop/Research/fit-hi-c/bin/fit-hi-c.py -f /Users/yingsun/Desktop/Research/Downsampling/frags_file_s2.gz -i /Users/yingsun/Desktop/Research/Downsampling/inters_file_s2.gz -o /Users/yingsun/Desktop/Research/Downsampling -v")
+
+#scp -r /Users/yingsun/Desktop/Research/Downsampling/spline_pass2_s2.significances.txt.gz yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun
+#Doing fit hi-c on my own computer and upload the result back onto longleaf[had trouble using fit hi-c on the server]
+#scp your_username@longleaf.unc.edu:/proj/yunligrp/users/alicesun/frags_file_s1
+
+#scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/frags_file_s1.gz
+
+#call peaks with HMRFBayes package with outputs from fit hi-c in the previous step
+setwd("/proj/yunligrp/users/alicesun")
+sig1<-read_delim("spline_pass2_s1.significances.txt.gz",delim="\t")
+sig2<-read_delim("spline_pass2_s2.significances.txt.gz",delim="\t")
+fit1<-read_delim("fithic_pass2_s1.txt",delim="\t")
+fit2<-read_delim("fithic_pass2_s2.txt",delim="\t")
+filtered_contacts_s1<-sig1[,c(2,4,5,8)]
+filtered_contacts_s2<-sig2[,c(2,4,5,8)]
+filtered_contacts_s1$expectCount<-filtered_contacts_s1$expectCount*1.1
+filtered_contacts_s2$expectCount<-filtered_contacts_s2$expectCount*1.1
+write_delim(filtered_contacts_s1,path="filtered_contacts_s1.txt",delim="\t")
+write_delim(filtered_contacts_s2,path="filtered_contacts_s2.txt",delim="\t")
+
+#run HMRFBayesHiC to produce posterior probability
+library(HMRFBayesHiC)
+HiC_HMRF_Bayes_File(file="filtered_contacts_s1.txt",
+                    probfile="out_filtered_contacts_s1.txt",
+                    estimatorfile="out_filtered_params_s1.txt",
+                    sep="\t",header=TRUE, verbose=TRUE, burnIn = 1000, iter = 1000)
+
+posterior_probs_s1<-read_delim("out_filtered_contacts_s1.txt",delim="\t")
+
+HiC_HMRF_Bayes_File(file="filtered_contacts_s2.txt",
+                    probfile="out_filtered_contacts_s2.txt",
+                    estimatorfile="out_filtered_params_s2.txt",
+                    sep="\t",header=TRUE, verbose=TRUE, burnIn = 1000, iter = 1000)
+posterior_probs_s2<-read_delim("out_filtered_contacts_s2.txt",delim="\t")
+
+# convert region to bin
+posterior_probs_s1$cbin_1<-(posterior_probs_s1$Frag1-12200000)/10000 +7960
+posterior_probs_s1$cbin_2<-(posterior_probs_s1$Frag2-12200000)/10000 +7960
+posterior_probs_s1$read_1<-(posterior_probs_s1$cbin_1-7960) + 1
+posterior_probs_s1$read_2<-(posterior_probs_s1$cbin_2-7960) + 1
+
+posterior_probs_s2$cbin_1<-(posterior_probs_s2$Frag1-12200000)/10000 +7960
+posterior_probs_s2$cbin_2<-(posterior_probs_s2$Frag2-12200000)/10000 +7960
+posterior_probs_s2$read_1<-(posterior_probs_s2$cbin_1-7960) + 1
+posterior_probs_s2$read_2<-(posterior_probs_s2$cbin_2-7960) + 1
+
+
+
+#call peaks for downsampled imaging data
+
+#calculate pairwise distance for each imaging sample data and categorize contact as <150nm
+
+dat<-imaging_s2%>%distinct(class,s)
+mats<-vector('list',length=nrow(imaging_s2%>%distinct(class,s)))
+long<-vector('list',length=length(mats))
+k<-0
+for(i in unique(dat$class)){
+  dat<-imaging_s2[imaging_s2$class==i,]
+  cells<-unique(dat$s)
+  for(j in cells){
+    k<-k+1
+    dat2<-dat[dat$s==j,]
+    temp<-rdist(dat2[,c(4:6)])
+    colnames(temp)<-dat2$read
+    rownames(temp)<-dat2$read
+    mats[[k]]<-temp
+    obj<-as.data.frame(temp,stringsAsFactors = FALSE)
+    obj$read_1<-rownames(obj)
+    obj$class=i
+    obj$s=j
+    # 3 is for read_1,class, s
+    temp2<-pivot_longer(obj,cols=1:(ncol(obj)-3),names_to="read_2",values_to="dist")
+    temp2$read_1<-as.numeric(temp2$read_1)
+    temp2$read_2<-as.numeric(temp2$read_2)
+    #temp2<-temp2[temp2$read_1<=temp2$read_2,]
+    long[[k]]<-temp2
+    if(k%%100==0){print(k)}
+  }
+}
+dists<-do.call(rbind,long)
+dists<-dists%>%select(class,s,read_1,read_2,dist)
+
+dists$contact<-as.numeric(dists$dist<=150)
+dist_plot_s2<-dists%>%group_by(read_1,read_2)%>%summarise(sum_contact=sum(contact))
+
+#contact from imaging data only ->fit hi-c and HMRFBayesHiC
+inters_file_imaging_s1<-as.data.frame(cbind("3R",dist_plot_s1$read_1,"3R",dist_plot_s1$read_2,dist_plot_s1$sum_contact),stringsAsFactors = F)
+inters_file_imaging_s2<-as.data.frame(cbind("3R",dist_plot_s2$read_1,"3R",dist_plot_s2$read_2,dist_plot_s2$sum_contact),stringsAsFactors = F)
+colnames(inters_file_imaging_s1)<-c("chr1","from.coord_1","chr2","from.coord_2","observed_count")
+colnames(inters_file_imaging_s2)<-c("chr1","from.coord_1","chr2","from.coord_2","observed_count")
+inters_file_imaging_s1$from.coord_1<-(as.numeric(inters_file_imaging_s1$from.coord_1)-1)*10000 + min
+inters_file_imaging_s2$from.coord_1<-(as.numeric(inters_file_imaging_s2$from.coord_1)-1)*10000 + min
+inters_file_imaging_s1$from.coord_2<-(as.numeric(inters_file_imaging_s1$from.coord_2)-1)*10000 + min
+inters_file_imaging_s2$from.coord_2<-(as.numeric(inters_file_imaging_s2$from.coord_2)-1)*10000 + min
+inters_file_imaging_s1<-inters_file_imaging_s1[inters_file_imaging_s1$from.coord_1<inters_file_imaging_s1$from.coord_2,]
+inters_file_imaging_s2<-inters_file_imaging_s2[inters_file_imaging_s2$from.coord_1<inters_file_imaging_s2$from.coord_2,]
+
+total_contacts<-rep(NA,length=70)
+j<-0
+for(i in seq(12200000,12890000,by=10000)){
+  j<-j+1
+  total_contacts[j]<-sum(as.numeric(inters_file_imaging_s1$observed_count)[as.numeric(inters_file_imaging_s1$from.coord_1)==i | as.numeric(inters_file_imaging_s1$from.coord_2)==i])
+}
+frags_file_imaging_s1<-as.data.frame(cbind("3R",0,seq(12200000,12890000,by=10000),total_contacts,0),stringsAsFactors = F)
+
+total_contacts<-rep(NA,length=70)
+j<-0
+for(i in seq(12200000,12890000,by=10000)){
+  j<-j+1
+  total_contacts[j]<-sum(as.numeric(inters_file_imaging_s2$observed_count)[as.numeric(inters_file_imaging_s2$from.coord_1)==i | as.numeric(inters_file_imaging_s2$from.coord_2)==i])
+}
+frags_file_imaging_s2<-as.data.frame(cbind("3R",0,seq(12200000,12890000,by=10000),total_contacts,0),stringsAsFactors = F)
+
+setwd("/proj/yunligrp/users/alicesun")
+colnames(frags_file_imaging_s1)<-c("chr","extraField","start","marginalizedContactCount","extraField2")
+colnames(frags_file_imaging_s2)<-c("chr","extraField","start","marginalizedContactCount","extraField2")
+write_delim(frags_file_imaging_s1,path="frags_file_imaging_s1",delim="\t",col_names = F)
+write_delim(inters_file_imaging_s1,path="inters_file_imaging_s1",delim="\t",col_names = F)
+write_delim(frags_file_imaging_s2,path="frags_file_imaging_s2",delim="\t",col_names = F)
+write_delim(inters_file_imaging_s2,path="inters_file_imaging_s2",delim="\t",col_names = F)
+system("rm inters_file_imaging_s2.gz")
+system("gzip inters_file_imaging_s2 frags_file_imaging_s1")
+#system("rm inters_file_imaging_s2.gz frags_file_imaging_s2.gz")
+system("gzip inters_file_imaging_s2 frags_file_imaging_s2")
+
+system(scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/inters_file_imaging_s2.gz /Users/yingsun/Desktop/Research/Downsampling)
+python /Users/yingsun/Desktop/Research/fit-hi-c/bin/fit-hi-c.py -f /Users/yingsun/Desktop/Research/Downsampling/frags_file_imaging_s2.gz -i /Users/yingsun/Desktop/Research/Downsampling/inters_file_imaging_s2.gz -o /Users/yingsun/Desktop/Research/Downsampling -v
+
+scp -r /Users/yingsun/Desktop/Research/Downsampling/spline_pass2_imaging_s1.significances.txt.gz yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun
+scp -r /Users/yingsun/Desktop/Research/Downsampling/spline_pass2_imaging_s2.significances.txt.gz yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun
+scp -r /Users/yingsun/Desktop/Research/Downsampling/fithic_pass2_imaging_s1.txt yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun
+scp -r /Users/yingsun/Desktop/Research/Downsampling/fithic_pass2_imaging_s2.txt yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun
+
+#prepare for HMRFHiC for imaging data samples
+sig1<-read_delim("spline_pass2_imaging_s1.significances.txt.gz",delim="\t")
+fit1<-read_delim("fithic_pass2_imaging_s1.txt",delim="\t")
+filtered_contacts_imaging_s1<-sig1[,c(2,4,5,8)]
+write_delim(filtered_contacts_imaging_s1,path="filtered_contacts_imaging_s1.txt",delim="\t")
+
+sig2<-read_delim("spline_pass2_imaging_s2.significances.txt.gz",delim="\t")
+fit2<-read_delim("fithic_pass2_imaging_s2.txt",delim="\t")
+filtered_contacts_imaging_s2<-sig2[,c(2,4,5,8)]
+write_delim(filtered_contacts_imaging_s2,path="filtered_contacts_imaging_s2.txt",delim="\t")
+
+HiC_HMRF_Bayes_File(file="filtered_contacts_imaging_s1.txt",
+                    probfile="out_filtered_contacts_imaging_s1.txt",
+                    estimatorfile="out_filtered_params_imaging_s1.txt",
+                    sep="\t",header=TRUE, verbose=TRUE, burnIn = 1000, iter = 1000)
+HiC_HMRF_Bayes_File(file="filtered_contacts_imaging_s2.txt",
+                    probfile="out_filtered_contacts_imaging_s2.txt",
+                    estimatorfile="out_filtered_params_imaging_s2.txt",
+                    sep="\t",header=TRUE, verbose=TRUE, burnIn = 1000, iter = 1000)
+
+posterior_probs_imaging_s1<-read_delim("out_filtered_contacts_imaging_s1.txt",delim="\t")
+posterior_probs_imaging_s1$cbin_1<-(posterior_probs_imaging_s1$Frag1-min)/10000 +7960
+posterior_probs_imaging_s1$cbin_2<-(posterior_probs_imaging_s1$Frag2-min)/10000 +7960
+posterior_probs_imaging_s1$read_1<-(posterior_probs_imaging_s1$cbin_1-7960) + 1
+posterior_probs_imaging_s1$read_2<-(posterior_probs_imaging_s1$cbin_2-7960) + 1
+
+posterior_probs_imaging_s2<-read_delim("out_filtered_contacts_imaging_s2.txt",delim="\t")
+posterior_probs_imaging_s2$cbin_1<-(posterior_probs_imaging_s2$Frag1-min)/10000 +7960
+posterior_probs_imaging_s2$cbin_2<-(posterior_probs_imaging_s2$Frag2-min)/10000 +7960
+posterior_probs_imaging_s2$read_1<-(posterior_probs_imaging_s2$cbin_1-7960) + 1
+posterior_probs_imaging_s2$read_2<-(posterior_probs_imaging_s2$cbin_2-7960) + 1
+
+#system("rm spline_pass2_imaging_s2.significances.txt.gz fithic_pass2_imaging_s2.txt out_filtered_params_s2.txt filtered_contacts_imaging_s2.txt")
+
+#Plot each of the hi-c and imaging sample separately
+
+pdf(file="hi-C_prob_heatmap_s1.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_s1.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Hi-C Data\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_s2.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_s2.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Hi-C Data\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_imaging_s1.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_imaging_s1.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Imaging Data\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_imaging_s2.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_imaging_s2.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Imaging Data\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/hi-C_prob_heatmap_imaging_s2.pdf /Users/yingsun/Desktop/Research/Downsampling
+
+# Calculate Cauchy Combination p-value and plot(x, y, ...)
+posterior_probs_combp<-posterior_probs_s1
+for(i in 1:nrow(posterior_probs_s1)){
+posterior_probs_combp$PeakProbability[i]<-.5-(1/pi)*atan(.5*tan(pi*(.5-(ifelse(posterior_probs_s1$PeakProbability[i]==0,posterior_probs_s1$PeakProbability[i]+.00001,posterior_probs_s1$PeakProbability[i]))))+.5*tan(pi*(.5-(ifelse(posterior_probs_imaging_s1$PeakProbability[i]==0,posterior_probs_imaging_s1$PeakProbability[i]+.00001,posterior_probs_imaging_s1$PeakProbability[i])))))
+}
+write_delim(posterior_probs_combp,delim="\t",path="out_filtered_contacts_combp_1.txt")
+
+posterior_probs_combp<-posterior_probs_s1
+for(i in 1:nrow(posterior_probs_s1)){
+posterior_probs_combp$PeakProbability[i]<-.5-(1/pi)*atan(.5*tan(pi*(.5-(ifelse(posterior_probs_s1$PeakProbability[i]==0,posterior_probs_s1$PeakProbability[i]+.00001,posterior_probs_s1$PeakProbability[i]))))+.5*tan(pi*(.5-(ifelse(posterior_probs_imaging_s2$PeakProbability[i]==0,posterior_probs_imaging_s2$PeakProbability[i]+.00001,posterior_probs_imaging_s2$PeakProbability[i])))))
+}
+write_delim(posterior_probs_combp,delim="\t",path="out_filtered_contacts_combp_2.txt")
+
+posterior_probs_combp<-posterior_probs_s2
+for(i in 1:nrow(posterior_probs_s1)){
+posterior_probs_combp$PeakProbability[i]<-.5-(1/pi)*atan(.5*tan(pi*(.5-(ifelse(posterior_probs_s2$PeakProbability[i]==0,posterior_probs_s2$PeakProbability[i]+.00001,posterior_probs_s2$PeakProbability[i]))))+.5*tan(pi*(.5-(ifelse(posterior_probs_imaging_s1$PeakProbability[i]==0,posterior_probs_imaging_s1$PeakProbability[i]+.00001,posterior_probs_imaging_s1$PeakProbability[i])))))
+}
+write_delim(posterior_probs_combp,delim="\t",path="out_filtered_contacts_combp_3.txt")
+
+posterior_probs_combp<-posterior_probs_s2
+for(i in 1:nrow(posterior_probs_s1)){
+posterior_probs_combp$PeakProbability[i]<-.5-(1/pi)*atan(.5*tan(pi*(.5-(ifelse(posterior_probs_s2$PeakProbability[i]==0,posterior_probs_s2$PeakProbability[i]+.00001,posterior_probs_s2$PeakProbability[i]))))+.5*tan(pi*(.5-(ifelse(posterior_probs_imaging_s2$PeakProbability[i]==0,posterior_probs_imaging_s2$PeakProbability[i]+.00001,posterior_probs_imaging_s2$PeakProbability[i])))))
+}
+write_delim(posterior_probs_combp,delim="\t",path="out_filtered_contacts_combp_4.txt")
+
+# Plot Cauchy-combined Hi-C probabilities
+pdf(file="hi-C_prob_heatmap_combp_Cauchy_1.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_combp_1.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_combp_Cauchy_2.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_combp_2.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_combp_Cauchy_3.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_combp_3.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+pdf(file="hi-C_prob_heatmap_combp_Cauchy_4.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_combp_4.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/hi-C_prob_heatmap_combp_Cauchy_4.pdf /Users/yingsun/Desktop/Research/Downsampling

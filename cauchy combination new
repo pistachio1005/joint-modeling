@@ -1,0 +1,39 @@
+input<-read_delim("filtered_contacts_imaging.txt",delim="\t")
+
+
+min<-12200000 # min region (from imaging data)
+max<-12900000 # max region (from imaging data)
+
+orca_prob<-read_delim("ttest_pvalue_drosophila_outlier_final.txt",delim="\t",col_names = T)
+#Remove deplicate combination of pairs -> leave us with 2415 rows of data
+orca_prob<-orca_prob[!duplicated(t(apply(orca_prob[c("region_1", "region_2")], 1, sort))), ]
+
+#calculate number of peaks
+names(orca_prob) <- c('Frag1','Frag2','pvalue','new_p')
+hic_prob<-read_delim("out_filtered_contacts_all.txt",col_names=TRUE,delim="\t")
+#orca_prob$ExpectedCount<-fit_new$y[abs(orca_prob$Frag1-orca_prob$Frag2)+1]
+orca_prob$PeakProbability<-1-orca_prob$pvalue
+
+#Convert region to bins
+hic_prob$Frag1<-(hic_prob$Frag1-min)/10000 +7960
+hic_prob$Frag2<-(hic_prob$Frag2-min)/10000 +7960
+hic_prob$Frag1<-(hic_prob$Frag1-7960) + 1
+hic_prob$Frag2<-(hic_prob$Frag2-7960) + 1
+
+
+posterior_probs_combp<-hic_prob
+for(i in 1:nrow(hic_prob)){
+posterior_probs_combp$PeakProbability[i]<-.5-(1/pi)*atan(.5*tan(pi*(.5-(ifelse(hic_prob$PeakProbability[i]==0,hic_prob$PeakProbability[i]+.00001,hic_prob$PeakProbability[i]))))+.5*tan(pi*(.5-(ifelse(orca_prob$PeakProbability[i]==0,orca_prob$PeakProbability[i]+.00001,orca_prob$PeakProbability[i])))))
+}
+
+write_delim(posterior_probs_combp,delim="\t",path="out_filtered_contacts_combp_new.txt")
+
+# Plot 4: Cauchy-combined Hi-C probabilities
+pdf(file="hi-C_prob_heatmap_combp_Cauchy_new.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_combp_new.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+#scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/hi-C_prob_heatmap_combp_Cauchy_new.pdf /Users/yingsun/Desktop/Research

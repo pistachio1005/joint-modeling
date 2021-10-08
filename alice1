@@ -1,0 +1,46 @@
+pdf(file="contact_method_heatmap.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_imaging.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/new_contact_heatmap_u.pdf /Users/yingsun/Desktop/Research
+
+setwd("/proj/yunligrp/users/alicesun")
+
+contact<-read_delim("out_filtered_contacts_imaging.txt",delim="\t")
+distance<-read_delim("ttest_pvalue_drosophila_outlier_final.txt",delim="\t")
+distance<-distance[!duplicated(t(apply(distance[c("region_1", "region_2")], 1, sort))), ]
+
+contact_peak<-contact %>% filter(PeakProbability>0.95)
+distance_peak<-distance %>% filter(pvalue<1*10^(-20))
+
+contact$region_1<-(contact$Frag1-12200000)/10000+1
+contact$region_2<-(contact$Frag2-12200000)/10000+1
+
+m<-merge(contact_peak,distance_peak,by=c("region_1","region_2"))
+a<-merge(contact_peak,distance_peak,by=c("region_1","region_2"),all=TRUE)
+
+
+
+pdf(file="new_contact_heatmap_u.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="new_contact_u.txt",index=c(1,2,10),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Cauchy Combination Test\nPosterior Peak Probability",col=blue2red(100))
+dev.off()
+
+m$newpeak<-1
+
+new_contact<-merge(m,contact,by=c("region_1","region_2"),all=TRUE)
+new_contact$newpeak[which(is.na(new_contact$newpeak))]<-0
+nrow(new_contact%>%filter(newpeak==1))
+write_delim(new_contact,delim="\t",path="new_contact.txt")
+
+a$newpeak<-1
+new_contact<-merge(a,contact,by=c("region_1","region_2"),all=TRUE)
+
+new_contact$newpeak[which(is.na(new_contact$newpeak))]<-0
+nrow(new_contact%>%filter(newpeak==1))
+write_delim(new_contact,delim="\t",path="new_contact_u.txt")

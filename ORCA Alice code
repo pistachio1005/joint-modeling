@@ -1,0 +1,99 @@
+#Add the packages needed for fit-hi-c and HMRFBayesHiC
+library(readr)
+library(tidyverse)
+library(HMRFBayesHiC)
+library(Matrix)
+library(ggplot2)
+library(fields)
+library(tidyr)
+
+min<-12200000 # min region (from imaging data)
+max<-12900000 # max region (from imaging data)
+
+# Imaging Data, cleaned by Bryce
+setwd("/proj/yunligrp/users/bryce/orca/data/Mateo2019Nature")
+orca_10kb<-read_delim("ORCA_WT_10kb_rpt1_cleaned_interpolated.csv",delim="\t")
+
+#Specify the embryo number
+embryo_specific<-orca_10kb[orca_10kb$class=='c',]
+
+#Calculte pairwise distance and categorize contact as <150nm
+dat<-embryo_specific%>%distinct(class,s)
+mats<-vector('list',length=nrow(embryo_specific%>%distinct(class,s)))
+long<-vector('list',length=length(mats))
+k<-0
+for(i in unique(dat$class)){
+  dat<-embryo_specific[embryo_specific$class==i,]
+  cells<-unique(dat$s)
+  for(j in cells){
+    k<-k+1
+    dat2<-dat[dat$s==j,]
+    temp<-rdist(dat2[,c(4:6)])
+    colnames(temp)<-dat2$read
+    rownames(temp)<-dat2$read
+    mats[[k]]<-temp
+    obj<-as.data.frame(temp,stringsAsFactors = FALSE)
+    obj$read_1<-rownames(obj)
+    obj$class=i
+    obj$s=j
+    temp2<-pivot_longer(obj,cols=1:(ncol(obj)-3),names_to="read_2",values_to="dist")
+    temp2$read_1<-as.numeric(temp2$read_1)
+    temp2$read_2<-as.numeric(temp2$read_2)
+    long[[k]]<-temp2
+    if(k%%100==0){print(k)}
+  }
+}
+dists<-do.call(rbind,long)
+dists<-dists%>%select(class,s,read_1,read_2,dist)
+​
+dists$contact<-as.numeric(dists$dist<=150)
+dist_plot<-dists%>%group_by(read_1,read_2)%>%summarise(sum_contact=sum(contact))
+​
+#Prepare inters and frags files for fit-hi-c
+inters_file_imaging<-as.data.frame(cbind("3R",dist_plot$read_1,"3R",dist_plot$read_2,dist_plot$sum_contact),stringsAsFactors = F)
+colnames(inters_file_imaging)<-c("chr1","from.coord_1","chr2","from.coord_2","observed_count")
+inters_file_imaging$from.coord_1<-(as.numeric(inters_file_imaging$from.coord_1)-1)*10000 + min
+inters_file_imaging$from.coord_2<-(as.numeric(inters_file_imaging$from.coord_2)-1)*10000 + min
+inters_file_imaging<-inters_file_imaging[inters_file_imaging$from.coord_1<inters_file_imaging$from.coord_2,]
+
+total_contacts<-rep(NA,length=70)
+j<-0
+for(i in seq(12200000,12890000,by=10000)){
+  j<-j+1
+  total_contacts[j]<-sum(as.numeric(inters_file_imaging$observed_count)[as.numeric(inters_file_imaging$from.coord_1)==i | as.numeric(inters_file_imaging$from.coord_2)==i])
+}
+frags_file_imaging<-as.data.frame(cbind("3R",0,seq(12200000,12890000,by=10000),total_contacts,0),stringsAsFactors = F)
+colnames(frags_file_imaging)<-c("chr","extraField","start","marginalizedContactCount","extraField2")
+
+setwd("/proj/yunligrp/users/alicesun")
+
+write_delim(frags_file_imaging,path="frags_file_imaging_c",delim="\t",col_names = F)
+write_delim(inters_file_imaging,path="inters_file_imaging_c",delim="\t",col_names = F)
+
+#Execute fit-hi-c here
+
+#Prepare for HMRFBayesHiC
+setwd("/proj/yunligrp/users/alicesun")
+sig<-read_delim("spline_pass2_embryo_a.significances.txt.gz",delim="\t")
+fit<-read_delim("fithic_pass2_embryo_a.txt",delim="\t")
+filtered_contacts_imaging<-sig[,c(2,4,5,8)]
+write_delim(filtered_contacts_imaging,path="filtered_contacts_imaging_a.txt",delim="\t")
+
+HiC_HMRF_Bayes_File(file="filtered_contacts_imaging_a.txt",
+                    probfile="out_filtered_contacts_imaging_a.txt",
+                    estimatorfile="out_filtered_params_imaging_a.txt",
+                    sep="\t",header=TRUE, verbose=TRUE, burnIn = 1000, iter = 1000)
+
+posterior_probs_imaging<-read_delim("out_filtered_contacts_imaging_a.txt",delim="\t")
+posterior_probs_imaging$cbin_1<-(posterior_probs_imaging$Frag1-min)/10000 +7960
+posterior_probs_imaging$cbin_2<-(posterior_probs_imaging$Frag2-min)/10000 +7960
+posterior_probs_imaging$read_1<-(posterior_probs_imaging$cbin_1-7960) + 1
+posterior_probs_imaging$read_2<-(posterior_probs_imaging$cbin_2-7960) + 1
+
+#Plot imaging data
+pdf(file="hi-C_prob_heatmap_imaging_embryo_a.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="out_filtered_contacts_imaging_a.txt",index=c(1,2,5),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Imaging Data\nPosterior Peak Probability(Embryo a)",col=blue2red(100))
+dev.off()

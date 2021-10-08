@@ -1,0 +1,142 @@
+library(readr)
+library(tidyverse)
+library(HMRFBayesHiC)
+library(Matrix)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(fields)
+library(tidyr)
+library(ggpubr)
+library(rstatix)
+library(rlist)
+library(plyr)
+
+#Read in the 3D distance file
+setwd("/proj/yunligrp/users/alicesun")
+dists<-read_delim("dists_drosophila_3R",col_names=FALSE,delim="\t")
+cauchy<-read_delim("out_filtered_contacts_combp_new_ave.txt",delim="\t",col_names = T)
+names(dists) <- c('cell_type','cell','region_1','region_2','dist','linear')
+
+#Change threshold of the cauchy combined dataset
+a<-cauchy%>%filter(PeakProbability>0.999999999999999
+nrow(cauchy%>%filter(PeakProbability==1))
+cauchy1<-cauchy
+
+for (i in seq(1,2415,by=1)){
+  if (cauchy$PeakProbability[i]==1){
+    cauchy1$binary[i]=1
+  }
+  else{
+    cauchy1$binary[i]=0
+  }
+}
+
+table(cauchy1$binary)
+
+write.table(cauchy1, file = "cauchy_combination_binary_1.txt", sep = "\t",row.names = FALSE, col.names = TRUE)
+
+pdf(file="cauchy_combination_binary_1.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="cauchy_combination_binary_1.txt",index=c(1,2,6),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="Binary Cauchy Combination",col=blue2red(100))
+dev.off()
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/cauchy_combination_binary_1.pdf /Users/yingsun/Desktop/Research
+
+
+#Test if 3D distance is normally distributed for each linear distance
+get_dist_distribution<-function(n){
+  dist_n<-dists%>%filter(linear==n)
+  hist(dist_n$dist,prob=TRUE,main="distribution of 3D distance at a specific linear distance",xlab="3D distance(nm)")
+  lines(density(dist_n$dist),lwd=2,col="green")
+}
+
+#Draw a plot for specific distance pair
+#Pontential high variance among specific distance pairs
+
+dist_ave<-list()
+dists_n<-dists%>%filter(linear==40)
+for (i in seq(1,26,by=5)){
+  dist_pairwise<-dists_n%>%filter(region_1==i&region_2==i+40)
+  ave<-mean(dist_pairwise$dist)
+  dist_ave<-list.append(dist_ave,ave)
+}
+
+#Identify null values by filtering out outliers that are more than 1.5 standard deviation below the fit line
+fit<-smooth.spline(dists$linear,dists$dist,df=20)
+null<-data.frame()
+for (i in seq(0,69,by=1)){
+  if (i==0){
+    temp=dists%>%filter(linear==0)
+    null<-rbind(null,temp)
+  }
+  else {
+    dists_subset<-dists%>%filter(linear==i)
+    std<-sd(dists_subset$dist)
+    cut<-fit$y[i+1]-1.5*std
+    temp<-dists_subset%>%filter(dist>=cut)
+    null<-rbind(null,temp)
+  }
+}
+
+fit_new<-smooth.spline(null$linear,null$dist,df=20)
+#Take average betweens cells to reduce observations -> prevent extreme small p values
+#Subset to specific distance
+#dist_12<-dists%>%filter(region_1==1&region_2==2)
+#Take average of every 10 cells in the dists dataset
+#n <- 10;
+#average_12<-aggregate(dist_12$dist, list(rep(1:(nrow(dist_12) %/% n + 1), each = n, len = nrow(dist_12))), mean)[-1]
+
+pVal<-list()
+EffectSize<-list()
+for (i in seq(1,70,by=1)){
+  for (j in seq(1,70,by=1)){
+    test<-dists%>%filter(dists$region_1==i&dists$region_2==j)
+    test<-aggregate(test$dist, list(rep(1:(nrow(test) %/% 100 + 1), each = 100, len = nrow(test))), mean)[-1]
+    num<-abs(i-j)
+    #pVal[[length(pVal) + 1]]<-t.test(test$x,mu=fit_new$y[num+1],alternative = "less")$p.value
+    EffectSize[length(EffectSize)+1]<-mean(test$x)/fit_new$y[num+1]
+  }
+}
+
+
+#Manually Create chromosome loci index 70*70
+
+list0<-seq(1,70,by=1)
+seg1<-rep(list0,70)
+
+seg2<-list()
+for (i in seq(1,70,by=1)){
+  list1<-list(rep(i, 70))
+  seg2<-list.append(seg2,list1)
+}
+
+seg2<- unlist(seg2,recursive=TRUE)
+pVal<- unlist(pVal,recursive=TRUE)
+
+ttest_pvalue_effect<-do.call(rbind, Map(data.frame, region_1=seg2, region_2=seg1,effect=EffectSize))
+ttest_pvalue_effect<-ttest_pvalue<-ttest_pvalue_effect%>%filter(region_1!=region_2)
+
+#plot the p-value heatmap and used negative log 10 scale
+pdf(file="ORCA_ttest_outlier_final_ave.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="ttest_pvalue_drosophila_outlier_final.txt",index=c(1,2,3),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=TRUE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="ORCA One-sample ttest Heatmap",col=blue2red(100))
+dev.off()
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/ORCA_ttest_outlier_final_ave.pdf /Users/yingsun/Desktop/Research
+
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/hi-C_prob_heatmap_combp_Cauchy_new_ave.pdf /Users/yingsun/Desktop/Research
+
+python /proj/yunligrp/users/alicesun/mia-sig-master/bin/domain_dist_sigtest.py GSM3347523A dm3 0.05 1 100000 /proj/yunligrp/users/alicesun/mia-sig-master/data/ GSM3347523A.txt /proj/yunligrp/users/alicesun/mia-sig-master/data/
+
+
+#Estimate effect sizes
+ttest_pvalue<-read_delim("ttest_pvalue_drosophila_outlier_final.txt",delim="\t",col_names = T)
+
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/share/labMtgSlides/2021-02-05_BryceRowland_FusedLassoPRS.pptx /Users/yingsun/Desktop/Research

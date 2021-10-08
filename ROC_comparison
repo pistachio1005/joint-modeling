@@ -1,0 +1,143 @@
+#Cauchy Combination method (downsampled vs whole data)at different truth threshold
+library(bayestestR) #->for calculating auc
+setwd("/proj/yunligrp/users/alicesun")
+
+#Calculate cauchy combined posterior probability
+hic_prob<-read_delim("out_filtered_contacts_all.txt",col_names=TRUE,delim="\t")
+orca_prob<-read_delim("ttest_pvalue_drosophila_outlier_final.txt",delim="\t",col_names = T)
+#Remove deplicate combination of pairs -> leave us with 2415 rows of data
+orca_prob<-orca_prob[!duplicated(t(apply(orca_prob[c("region_1", "region_2")], 1, sort))), ]
+
+#calculate number of peaks
+names(orca_prob) <- c('Frag1','Frag2','pvalue','new_p')
+orca_prob$Frag1<-12200000+10000*(orca_prob$Frag1-1)
+orca_prob$Frag2<-12200000+10000*(orca_prob$Frag2-1)
+
+orca_sig<-orca_prob%>%filter(pvalue<1.0*10^(-14))
+#hic_sig<-hic_prob%>%filter(ObservedCount>15, ExpectedCount>5,ObservedCount/ExpectedCount>1.5,PeakProbability>0.95)
+hic_sig<-hic_prob%>%filter(PeakProbability>0.95)
+orca_lowerbound<-orca_prob%>%filter(pvalue<1*10^(-10))
+hic_lowerbound<-hic_prob%>%filter(PeakProbability>0.5)
+
+union<-merge(orca_sig,hic_sig,by=c('Frag1','Frag2'),all=TRUE)
+int<-merge(orca_sig,hic_sig,by=c('Frag1','Frag2'))
+u1<-merge(orca_sig,hic_lowerbound,by=c('Frag1','Frag2'))
+u2<-merge(hic_sig,orca_lowerbound,by=c('Frag1','Frag2'))
+union_less<-merge(u1,u2,by=c('Frag1','Frag2'),all=TRUE)
+
+
+
+#Hold hic threhold constant change orca threshold and plot roc curve
+#read in the downsampled datasets
+hic_s1<-read_delim("out_filtered_contacts_s1.txt"c)
+imaging_s1_pvalue<-read_delim("ttest_pvalue_drosophila_outlier_ds1_final",delim="\t")
+imaging_s1_pvalue<-imaging_s1_pvalue[imaging_s1_pvalue$region_1!=imaging_s1_pvalue$region_2,]
+imaging_s1_pvalue<-imaging_s1_pvalue[!duplicated(t(apply(imaging_s1_pvalue[c("region_1", "region_2")], 1, sort))), ]
+imaging_s1_pvalue$Frag1<-12200000+10000*(imaging_s1_pvalue$region_1-1)
+imaging_s1_pvalue$Frag2<-12200000+10000*(imaging_s1_pvalue$region_2-1)
+
+
+threshold<-list()
+
+for (i in seq(0,40,by=0.5)){
+  num<-1*10^(-i)
+  threshold[[length(threshold) + 1]] <- num
+}
+
+tpr<-list()
+fpr<-list()
+sig_hic_1<-hic_s1%>%filter(PeakProbability>0.95)
+lb_i<-imaging_s1_pvalue%>%filter(pvalue<1*10^(-10))
+sig_hic_1<-merge(sig_hic_1,lb_i,by=c('Frag1','Frag2'))
+for (i in threshold){
+  imaging_pos<-imaging_s1_pvalue %>% filter(pvalue<=i)
+  lb_h<-hic_s1%>%filter(PeakProbability>0.5)
+  imaging_pos<-merge(imaging_pos,lb_h,by=c('Frag1','Frag2'))
+  union_ds<-merge(sig_hic_1,imaging_pos,by=c("Frag1","Frag2"),all=TRUE)
+  int<-merge(union_less,union_ds,by=c("Frag1","Frag2"))
+  tpr[[length(tpr) + 1]] <- nrow(int)/nrow(union_less)
+  fpr[[length(tpr) + 1]] <- 1-((nrow(hic_prob)-nrow(union_less)-nrow(union_ds)+nrow(int))/(nrow(hic_prob)-nrow(union_less)))
+}
+
+tpr<- unlist(tpr,recursive=TRUE)
+fpr<- unlist(fpr,recursive=TRUE)
+roc_data4 <- do.call(rbind, Map(data.frame,TPR=tpr, FPR=fpr))
+plot(roc_data1$FPR,roc_data1$TPR,main="Downsampling ROC Curve",xlab="1 - Specificity",ylab="Sensitivity",xlim=c(0,1), ylim=c(0,1))
+
+
+points(roc_data1$FPR,roc_data1$TPR,col="black")
+points(roc_data2$FPR,roc_data2$TPR,col="pink")
+points(roc_data4$FPR,roc_data4$TPR,col="yellow")
+lo<- loess(roc_data1$TPR~roc_data1$FPR,control=loess.control(surface = "direct"))
+j<-order(roc_data1$FPR)
+lines(roc_data1$FPR[j],lo$fitted[j],col="red",lwd=2)
+
+plot(x.all <- seq(3,200,3),
+     predict(object = lo,newdata = x.all),
+     type="l", col="blue")
+#Hold ORCA threshold constant
+sig_orca_1<-imaging_s1_pvalue%>%filter(pvalue<1*10^(-14))
+
+tpr<-list()
+fpr<-list()
+for (i in seq(0,1,by=0.0005)){
+  hic_pos<-hic_s1%>%filter(PeakProbability>=i)
+  union_ds<-merge(sig_orca_1,hic_pos,by=c("Frag1","Frag2"),all=TRUE)
+  int<-merge(union,union_ds,by=c("Frag1","Frag2"))
+  tpr[[length(tpr) + 1]] <- nrow(int)/nrow(union)
+  fpr[[length(tpr) + 1]] <- 1-((nrow(hic_prob)-nrow(union)-nrow(union_ds)+nrow(int))/(nrow(hic_prob)-nrow(union)))
+}
+tpr<- unlist(tpr,recursive=TRUE)
+fpr<- unlist(fpr,recursive=TRUE)
+roc_data2 <- do.call(rbind, Map(data.frame,TPR=tpr, FPR=fpr))
+plot(roc_data$FPR,roc_data$TPR,main="ROC Curve(Imaging threshold=1*10^(-14))",xlab="1 - Specificity",ylab="Sensitivity",col="red",add=TRUE)
+
+#Cauchy Combination Method ROC curve
+all<-read_delim("out_filtered_contacts_combp.txt",delim="\t")
+ds1<-read_delim("out_filtered_contacts_combp_1.txt",delim="\t")
+
+tpr<-list()
+fpr<-list()
+sig<-all%>%filter(ObservedCount>15, ExpectedCount>5,ObservedCount/ExpectedCount>1.5,PeakProbability>0.95)
+for (i in seq(0,1,by=0.0005)){
+  pos<-ds1%>% filter(PeakProbability>=i)
+  int<-merge(sig,pos,by=c("Frag1","Frag2"))
+  tpr[[length(tpr) + 1]] <- nrow(int)/nrow(sig)
+  fpr[[length(tpr) + 1]] <- 1-((nrow(all)-nrow(sig)-nrow(pos)+nrow(int))/(nrow(all)-nrow(sig)))
+}
+
+tpr<- unlist(tpr,recursive=TRUE)
+fpr<- unlist(fpr,recursive=TRUE)
+roc_data4 <- do.call(rbind, Map(data.frame,TPR=tpr, FPR=fpr))
+roc_data4[nrow(roc_data4) + 1,] = c(0,0)
+roc_data1[nrow(roc_data1) + 1,] = c(0,0)
+roc_data2[nrow(roc_data2) + 1,] = c(0,0)
+
+roc_data1$FPR <- sort(roc_data1$FPR)
+roc_data1$TPR <- roc_data1$TPR[order(roc_data1$FPR)]
+
+ggplot(roc_data2,aes(x=FPR,y=TPR)) + geom_point() + xlim(0,1) + ylim(0,1) + stat_smooth(fullrange=TRUE)
+
+fit<-smooth.spline(x=roc_data4$FPR, y=roc_data4$TPR)
+lines(fit,col="yellow",lwd=2)
+reorder <- order(roc_data1$FPR)
+roc_data1$FPR<-roc_data1$FPR[reorder]
+fit<-stat_smooth(formula=roc_data1$TPR[reorder]~roc_data1$FPR[reorder],method="loess",fullrange=TRUE)
+lines(fit)
+
+roc_data1 %>%
+  mutate(loess = predict(loess(TPR ~ FPR, data = roc_data1))) %>%
+  ggplot(aes(FPR,TPR)) +
+  geom_point(color = "grey50") +
+  geom_line(aes(y = loess))
+
+lw <- loess(TPR ~ FPR,data=roc_data1)
+j <- order(roc_data1$FPR)
+lines(predict(lw),col="black",lwd=3)
+
+newroc <- roc_data1[order(roc_data1$TPR),]
+
+scatter.smooth(x=roc_data1$FPR, y=roc_data1$TPR, ylim=c(0,1),xlim=c(0,1),fullrange=TRUE,span=2/3)
+
+
+area_under_curve(roc_data4$FPR,roc_data4$TPR, method = "spline")

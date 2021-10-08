@@ -1,0 +1,193 @@
+#qsub $/proj/yunligrp/users/alicesun/mia-sig-master/bin/domain_dist_sigtest.pbs
+
+chiadrop_rep1<-read_delim("GSM3347523_ChIA-Drop-Rep1.Fragnum_PlinePgem.gemline.txt",delim="\t")
+test<-read_delim("GSM3347523T.txt",delim="\t")
+
+#filter to only chromosome 3R
+chiadrop_3R<-chiadrop_rep1%>%filter(grepl('chr3R',GEM_coordinate))
+write.table(chiadrop_3R, file = "GSM3347523_3R.txt", sep = "\t",row.names = FALSE, col.names = TRUE)
+
+
+
+#Try producing expected distance
+library(fields)
+library(tidyr)
+setwd("/proj/yunligrp/users/bryce/orca/data/Mateo2019Nature")
+orca_10kb<-read_delim("ORCA_WT_10kb_rpt1_cleaned_interpolated.csv",delim="\t")
+dat<-orca_10kb%>%distinct(class,s)
+mats<-vector('list',length=nrow(orca_10kb%>%distinct(class,s)))
+long<-vector('list',length=length(mats))
+k<-0
+for(i in unique(dat$class)){
+  dat<-orca_10kb[orca_10kb$class==i,]
+  cells<-unique(dat$s)
+  for(j in cells){
+    k<-k+1
+    dat2<-dat[dat$s==j,]
+    temp<-rdist(dat2[,c(4:6)])
+    colnames(temp)<-dat2$read
+    rownames(temp)<-dat2$read
+    mats[[k]]<-temp
+    obj<-as.data.frame(temp,stringsAsFactors = FALSE)
+    obj$read_1<-rownames(obj)
+    obj$class=i
+    obj$s=j
+    # 3 is for read_1,class, s
+    temp2<-pivot_longer(obj,cols=1:(ncol(obj)-3),names_to="read_2",values_to="dist")
+    temp2$read_1<-as.numeric(temp2$read_1)
+    temp2$read_2<-as.numeric(temp2$read_2)
+    #temp2<-temp2[temp2$read_1<=temp2$read_2,]
+    long[[k]]<-temp2
+    if(k%%100==0){print(k)}
+  }
+}
+dists<-do.call(rbind,long)
+dists<-dists%>%select(class,s,read_1,read_2,dist)
+
+dists$linear<-abs(dists$read_1-dists$read_2)
+
+setwd("/proj/yunligrp/users/alicesun")
+write_delim(dists,path="dists_drosophila_3R",delim="\t",col_names = F)
+dists$loglinear<-log(dists$linear)
+dists$logdist<-log(dists$dist)
+
+dists$new_logdists<-dists$logdist                                   # Duplicate data
+dists$new_logdists[is.na(dists$new_logdists) | dists$new_logdists== "Inf"] <- NA
+model<-lm(logdist ~ loglinear,data=dists)
+summary(model)
+
+​
+dists$contact<-as.numeric(dists$dist<=150)
+dist_plot<-dists%>%group_by(read_1,read_2)%>%summarise(sum_contact=sum(contact))
+
+#make plot so that the datapoint is visible
+dist_plot = ggplot(dists,aes(x=linear,y=dist))  +
+  ggtitle("Drosophila Chromosome 3D vs 1D distance") +
+  xlab("Linear Distancec(#barcode)") +
+  ylab("3D distance(nm)")
+p1 = dist_plot + geom_point()
+p2 = dist_plot + geom_point(alpha = 0.01, colour="purple") +
+  theme_bw()
+grid.arrange(p1,p2,ncol=2)
+
+#Try calculating average of 3D distance for each linear Distance
+
+#dist0<-dists%>%filter(linear==35)
+
+ave_dist<-list()
+for (i in seq(0,70,by=1)){
+  dist0<-dists%>%filter(linear==i)
+  ave_dist[[length(ave_dist) + 1]] <- mean(dist0$dist)
+}
+ave_dist<-ave_dist[-71]
+
+plot(seq(1,70,by=1),ave_dist)
+
+ggplot(dists, aes(linear, dist) ) +geom_point() +tat_smooth()
+
+
+
+#fitting smoothing splines using smooth.spline(X,Y,df=...)
+fit1<-smooth.spline(,wage,df=16) #16 degrees of freedom
+#Plotting both cubic and Smoothing Splines
+plot(age,wage,col="grey",xlab="Age",ylab="Wages")
+points(age.grid,predict(fit,newdata = list(age=age.grid)),col="darkgreen",lwd=2,type="l")
+#adding cutpoints
+abline(v=c(25,40,60),lty=2,col="darkgreen")
+lines(fit1,col="red",lwd=2)
+legend("topright",c("Smoothing Spline with 16 df","Cubic Spline"),col=c("red","darkgreen"),lwd=2)
+
+
+
+setwd("/proj/yunligrp/users/alicesun")
+dists<-read_delim("dists_drosophila_3R",col_names=FALSE,delim="\t")
+
+#fit the smoothing spline model
+#or try loess fit
+#fit<-smooth.spline(dists$X6,dists$X5,df=10)
+fit1<-smooth.spline(dists$X6,dists$X5,df=20)
+fit2<-smooth.spline(dists$X6,dists$X5,df=15)
+fit3<-smooth.spline(dists$X6,dists$X5,df=80)
+pred <- stats:::predict.smooth.spline(fit,dists$V6)$y
+lo <- loess(dists$V5~dists$V6)
+plot(dists$V6,dists$V5)
+lines(fit,col="red")
+
+  broom::augment()%>%
+  ggplot(aes(x=dists$V6))+
+  geom_point(aes(y=dists$V5))+
+  geom_line(aes(y=.fitted))
+
+#
+
+
+#conduct one-sample t-test for each pair of the loci
+
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+
+
+pVal<-list()
+for (i in seq(1,70,by=1)){
+  for (j in seq(1,70,by=1)){
+    test<-dists%>%filter(dists$X3==i&dists$X4==j)
+    num<-abs(i-j)
+    pVal[[length(pVal) + 1]]<-t.test(test$X5,mu=fit1$y[num+1],alternative = "less")$p.value
+  }
+}
+
+pVal_df<-as.data.frame(pVal)
+write_delim(pVal_df,path="pVal_drosophila_3R",delim="\t",col_names = F)
+pVal_df<-read_delim("pVal_drosophila_3R",delim="\t",col_names=F)
+pVal<-as.list(pVal_df)
+#Try different filtering criteria
+
+pVal_df<-do.call(rbind.data.frame,pVal)
+names(pVal_df)[1] <- "p-value"
+
+library(rlist)
+list0<-seq(1,70,by=1)
+seg1<-rep(list0,70)
+
+seg2<-list()
+for (i in seq(1,70,by=1)){
+  list1<-list(rep(i, 70))
+  seg2<-list.append(seg2,list1)
+}
+
+seg2<- unlist(seg2,recursive=FALSE)
+pVal<- unlist(pVal,recursive=FALSE)
+ttest_pvalue<-do.call(rbind, Map(data.frame, region_1=seg2, region_2=seg1,pvalue=pVal))
+write_delim(ttest_pvalue,path="ttest_pvalue_drosophila_3R_updated",delim="\t",col_names = T)
+ttest_pvalue<-read_delim("ttest_pvalue_drosophila_3R",delim="\t",col_names = F)
+write.table(ttest_pvalue_filtered, file = "ttest_pvalue_drosophila_3R_filtered2.txt", sep = "\t",row.names = FALSE, col.names = FALSE)
+ttest_pvalue$new_p <- -log10(ttest_pvalue$pvalue)
+ttest_pvalue_filtered<-ttest_pvalue%>%filter(new_p!=Inf)
+
+pdf(file="ORCA_ttest_heatmap_filtered2.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="ttest_pvalue_drosophila_3R_filtered2.txt",index=c(1,2,4),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="ORCA One-sample ttest Heatmap",col=blue2red(100))
+dev.off()
+
+scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/ORCA_ttest_heatmap_filtered2.pdf /Users/yingsun/Desktop/Research
+
+#scatterplot with large dataset change transparency
+ggplot(data=dists,aes(x=X6,y=X5))  +
+  geom_point(alpha = 0.1, colour='purple') +
+  stat_smooth()
+
+
+#smooth scatter plot 1Dvs3D Distance
+smoothScatter(dists$X6,dists$X5,colramp = colorRampPalette(c("#000099", "#00FEFF", "#45FE4F","#FCFF00", "#FF9400", "#FF3100")),xlab="Linear Distance(# Loci)",ylab="3D Distance(nm)")
+#smoothScatter(x, y, transformation = function(x) x ^ 0.4,
+              #colramp = colorRampPalette(c("#000099", "#00FEFF", "#45FE4F",
+                                           #"#FCFF00", "#FF9400", "#FF3100")))
+#lines(fit,col="red")
+fit1<-smooth.spline(dists$X6,dists$X5,df=20)
+lines(fit1,col="black")
+
+lines(fit2,col="purple")
+lines(fit3,col="white")

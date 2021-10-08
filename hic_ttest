@@ -1,0 +1,77 @@
+library(readr)
+library(tidyverse)
+library(HMRFBayesHiC)
+library(Matrix)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(fields)
+library(tidyr)
+library(ggpubr)
+library(rstatix)
+
+#Read the distance file
+setwd("/proj/yunligrp/users/alicesun")
+dists<-read_delim("dists_drosophila_3R",col_names=FALSE,delim="\t")
+names(dists) <- c('cell_type','cell','region_1','region_2','dist','linear')
+
+#Fit a spline to the model
+fit<-smooth.spline(dists$linear,dists$dist,df=20)
+
+#Identify and drop values than are 3 standard(modified to 1.5 std) deviation below the mean(fit$y)
+null<-data.frame()
+for (i in seq(0,69,by=1)){
+  if (i==0){
+    temp=dists%>%filter(linear==0)
+    null<-rbind(null,temp)
+  }
+  else {
+    dists_subset<-dists%>%filter(linear==i)
+    std<-sd(dists_subset$dist)
+    cut<-fit$y[i+1]-1.5*std 
+    temp<-dists_subset%>%filter(dist>=cut)
+    null<-rbind(null,temp)
+  }
+}
+
+#Fit a new spline to the null data and plot
+fit_new<-smooth.spline(null$linear,null$dist,df=20)
+smoothScatter(dists$linear,dists$dist,colramp = colorRampPalette(c("#000099", "#00FEFF", "#45FE4F","#FCFF00", "#FF9400", "#FF3100")),xlab="Linear Distance(# Loci)",ylab="3D Distance(nm)")
+lines(fit,col="black",lwd=2)
+lines(fit_new,col="purple",lwd=2)
+
+#Do one-sample ttest for the new fitted values
+pVal<-list()
+for (i in seq(1,70,by=1)){
+  for (j in seq(1,70,by=1)){
+    test<-dists%>%filter(dists$region_1==i&dists$region_2==j)
+    num<-abs(i-j)
+    pVal[[length(pVal) + 1]]<-t.test(test$dist,mu=fit_new$y[num+1],alternative = "less")$p.value
+  }
+}
+
+list0<-seq(1,70,by=1)
+seg1<-rep(list0,70)
+
+seg2<-list()
+for (i in seq(1,70,by=1)){
+  list1<-list(rep(i, 70))
+  seg2<-list.append(seg2,list1)
+}
+
+seg2<- unlist(seg2,recursive=TRUE)
+pVal<- unlist(pVal,recursive=TRUE)
+ttest_pvalue<-do.call(rbind, Map(data.frame, region_1=seg2, region_2=seg1,pvalue=pVal))
+ttest_pvalue$new_p <- -log10(ttest_pvalue$pvalue)
+ttest_pvalue<-ttest_pvalue%>%filter(pvalue!=0)
+write.table(ttest_pvalue, file = "ttest_pvalue_drosophila_outlier_final.txt", sep = "\t",row.names = FALSE, col.names = TRUE)
+#ttest_pvalue<-read_delim("ttest_pvalue_drosophila_outlier_final.txt",delim="\t",col_names = T)
+
+pdf(file="ORCA_ttest_outlier_final.pdf",height=6,width=6)
+HiC_Plot_Heatmap(file="ttest_pvalue_drosophila_outlier_final.txt",index=c(1,2,4),
+                 verbose=TRUE,sep="\t",header=TRUE,negative.log10.scale=FALSE,
+                 xlab="Fragment Index",ylab="Fragment Index",
+                 main="ORCA One-sample ttest Heatmap",col=blue2red(100))
+dev.off()
+
+#scp yingsun@longleaf.unc.edu:/proj/yunligrp/users/alicesun/ORCA_ttest_outlier_final.pdf /Users/yingsun/Desktop/Research
